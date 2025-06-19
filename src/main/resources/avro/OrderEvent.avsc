@@ -1,0 +1,13 @@
+{
+  "namespace": "com.ecommerce.event",
+  "type": "record",
+  "name": "OrderEvent",
+  "fields": [
+    {"name": "event_type", "type": "string", "doc": "事件类型：order_created/payment_success/shipment/order_canceled/refund_applied"},
+    {"name": "order_id", "type": "string", "doc": "订单ID"},
+    {"name": "timestamp", "type": {"type": "long", "logicalType": "timestamp-millis"}, "doc": "事件时间戳（毫秒）"},
+    {"name": "user_id", "type": "string", "doc": "用户ID"},
+    {"name": "amount", "type": ["double", "null"], "doc": "订单金额（支付事件时必填）"},
+    {"name": "extra_info", "type": ["string", "null"], "doc": "扩展信息（如物流单号）"}
+  ]
+}

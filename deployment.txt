@@ -1,0 +1,212 @@
+#!/bin/bash
+
+# 部署脚本 - 用于 Jenkins 构建和部署应用
+# 支持多 IP 部署，使用 IPS 环境变量指定多个目标服务器
+
+# 全局变量定义
+WORKSPACE="/root/.jenkins/workspace/Dayu-multistage-Developer"
+
+# 检查必要的环境变量
+if [ -z "$IPS" ]; then
+    echo "错误: 未设置 IPS 环境变量 (多个 IP 用逗号分隔)"
+    exit 1
+fi
+
+if [ -z "$DEPLOYMENT_DIR" ]; then
+    echo "错误: 未设置 DEPLOYMENT_DIR 环境变量"
+    exit 1
+fi
+
+if [ -z "$USER" ]; then
+    echo "警告: 未设置 USER 环境变量，默认使用 root"
+    USER="root"
+fi
+
+# 日志函数
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+}
+
+# 处理SSH主机密钥验证
+handle_ssh_key() {
+    local ip=$1
+    log "检查并更新服务器 $ip 的 SSH 主机密钥..."
+   
+    # 检查known_hosts文件是否存在
+    if [ ! -f ~/.ssh/known_hosts ]; then
+        mkdir -p ~/.ssh
+        touch ~/.ssh/known_hosts
+        chmod 600 ~/.ssh/known_hosts
+    fi
+   
+    # 删除已知的主机密钥（如果存在）
+    ssh-keygen -R "$ip" 2>/dev/null
+   
+    # 尝试连接并接受新的主机密钥
+    ssh-keyscan -H "$ip" 2>/dev/null >> ~/.ssh/known_hosts
+   
+    log "SSH 主机密钥处理完成"
+}
+
+# 分割 IP 地址字符串为数组
+IFS=',' read -ra IP_ARRAY <<< "$IPS"
+
+# 主项目构建函数
+build_backend() {
+    log "开始后端项目构建..."
+    log "当前目录是: $(pwd)"
+	
+	export JAVA_HOME=/usr/local/jdk11
+    export PATH=$JAVA_HOME/bin:$PATH
+    java -version
+   
+    cd "${WORKSPACE}/topsa-multistage"
+    if [ $? -ne 0 ]; then
+        log "错误: 无法进入后端项目目录"
+        return 1
+    fi
+   
+    log "执行 Maven 构建..."
+    mvn clean install -Dmaven.test.skip=true -U
+    if [ $? -ne 0 ]; then
+        log "错误: Maven 构建失败"
+        return 1
+    fi
+   
+    log "后端项目构建完成"
+    return 0
+}
+
+# 部署到单个服务器
+deploy_to_server() {
+    local ip=$1
+    log "开始部署到服务器: $ip"
+   
+    # 处理SSH主机密钥
+    handle_ssh_key $ip
+   
+    cd "${WORKSPACE}/topsa-multistage/topsa-multistage-biz/target"
+    if [ $? -ne 0 ]; then
+        log "错误: 无法进入后端项目 target 目录"
+        return 1
+    fi
+   
+    # 复制后端文件
+    log "复制后端依赖库..."
+    scp -r lib ${USER}@${ip}:${DEPLOYMENT_DIR}
+    if [ $? -ne 0 ]; then
+        log "警告: 复制 lib 目录失败"
+    fi
+   
+    log "复制后端 JAR 文件..."
+    scp -r topsa-multistage-biz.jar ${USER}@${ip}:${DEPLOYMENT_DIR}
+    if [ $? -ne 0 ]; then
+        log "错误: 复制 JAR 文件失败"
+        return 1
+    fi
+   
+    log "复制配置文件..."
+    scp -r config ${USER}@${ip}:${DEPLOYMENT_DIR}
+    if [ $? -ne 0 ]; then
+        log "警告: 复制 config 目录失败"
+    fi
+   
+    log "复制服务脚本..."
+    scp -r service.sh ${USER}@${ip}:${DEPLOYMENT_DIR}/bin
+    if [ $? -ne 0 ]; then
+        log "警告: 复制 service.sh 失败"
+    fi
+   
+    # 前端构建和部署
+    build_and_deploy_frontend $ip
+   
+    # 重启服务
+    log "重启服务..."
+    ssh root@${ip} "su - ${USER} && tt restart multistage"
+    if [ $? -ne 0 ]; then
+        log "警告: 重启服务可能失败，请手动检查"
+    fi
+   
+    log "服务器 $ip 部署完成"
+    return 0
+}
+
+# 前端构建和部署
+build_and_deploy_frontend() {
+    local ip=$1
+    log "开始前端编译打包..."
+    log "当前目录: $(pwd)"
+   
+    cd "${WORKSPACE}/topsa-web"
+    if [ $? -ne 0 ]; then
+        log "错误: 无法进入前端项目目录"
+        return 1
+    fi
+   
+    log "清理并解压前端依赖..."
+    rm -rf node_modules && unzip node_modules.zip
+    chmod 777 -R node_modules
+   
+    log "设置 Node.js 环境..."
+    source /usr/nvm/nvm-0.38.0/nvm.sh
+    nvm use 12.14.0
+   
+    log "更新 package.json..."
+    sed -i 's/"name".*/"name": "multistage",/g' package.json
+    cat package.json | head -n 3
+   
+    log "执行前端构建..."
+    npm run build:multistage
+    if [ $? -ne 0 ]; then
+        log "错误: 前端构建失败"
+        return 1
+    fi
+   
+    log "部署前端到服务器: $ip"
+    ssh root@${ip} "rm -rf ${DEPLOYMENT_DIR}/config/static"
+   
+    cd "${WORKSPACE}/topsa-web/dist/multistage"
+    if [ $? -ne 0 ]; then
+        log "错误: 无法进入前端构建输出目录"
+        return 1
+    fi
+   
+    log "复制前端文件..."
+    scp -r * ${USER}@${ip}:${DEPLOYMENT_DIR}/config/static
+    if [ $? -ne 0 ]; then
+        log "警告: 复制前端文件失败"
+    fi
+   
+    log "前端部署完成"
+    return 0
+}
+
+# 主执行流程
+main() {
+    log "开始部署流程..."
+    log "部署目标 IP: $IPS"
+    log "部署目录: $DEPLOYMENT_DIR"
+    log "部署用户: $USER"
+    log "工作区路径: ${WORKSPACE}"
+   
+    # 构建后端项目
+    build_backend
+    if [ $? -ne 0 ]; then
+        log "后端构建失败，终止部署"
+        exit 1
+    fi
+   
+    # 部署到每个服务器
+    for ip in "${IP_ARRAY[@]}"; do
+        deploy_to_server $ip
+        if [ $? -ne 0 ]; then
+            log "警告: 服务器 $ip 部署可能不完全成功"
+			exit 1
+        fi
+    done
+   
+    log "所有服务器部署完成"
+}
+
+# 执行主流程
+main
